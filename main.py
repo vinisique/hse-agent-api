@@ -171,7 +171,7 @@ def _build_plan_prompt(req: ActionPlanRequest, rag_ctx: str) -> str:
     return prompt
 
 
-def _parse_analysis(raw: dict, model: str) -> AnalysisResponse:
+def _parse_analysis(raw: dict, model: str, rag_used: bool = False) -> AnalysisResponse:
     problems = [
         Problem(
             titulo=p.get("titulo", ""),
@@ -210,7 +210,7 @@ def _parse_analysis(raw: dict, model: str) -> AnalysisResponse:
         problems=problems,
         action_plan=action_plan,
         pdca=pdca,
-        rag_used=False,
+        rag_used=rag_used,
         model=model,
     )
 
@@ -324,8 +324,7 @@ def generate_insight(
         log.error("Provider error: %s", e)
         raise HTTPException(status_code=502, detail=f"Erro no modelo: {e}")
 
-    result = _parse_analysis(raw, provider.model_name)
-    result.rag_used = rag_used
+    result = _parse_analysis(raw, provider.model_name, rag_used=rag_used)
     return result
 
 
