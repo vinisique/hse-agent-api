@@ -1,16 +1,28 @@
 """
 main.py — Serviço FastAPI · Agente HSE-IT · Vivamente 360°
 ══════════════════════════════════════════════════════════════
-Substitui o Streamlit como runtime do agente de IA.
 Expõe endpoints HTTP que o Next.js chama internamente.
 
 Variáveis de ambiente necessárias (.env):
-    GROQ_API_KEY   = "gsk_..."
-    PG_HOST, PG_PORT, PG_DB, PG_USER, PG_PASSWORD  (pgvector RAG)
+    LLM_PROVIDER   = openrouter | openai | anthropic   (padrão: openrouter)
+
+    # OpenRouter (padrão)
+    OPENROUTER_API_KEY = "sk-or-..."
+    OPENROUTER_MODEL   = "meta-llama/llama-3.3-70b-instruct"  (opcional)
+
+    # OpenAI
+    OPENAI_API_KEY = "sk-..."
+    OPENAI_MODEL   = "gpt-4o"  (opcional)
+
+    # Anthropic
+    ANTHROPIC_API_KEY = "sk-ant-..."
+    ANTHROPIC_MODEL   = "claude-sonnet-4-5"  (opcional)
+
+    PG_HOST, PG_PORT, PG_DB, PG_USER, PG_PASSWORD  (pgvector RAG — opcional)
     API_SECRET_KEY = "chave-interna-entre-nextjs-e-python"
 
 Instalar:
-    pip install fastapi uvicorn groq python-dotenv \
+    pip install fastapi uvicorn openai anthropic python-dotenv \
                 sentence-transformers psycopg2-binary pgvector
 
 Rodar:
@@ -19,19 +31,19 @@ Rodar:
 
 from __future__ import annotations
 
-import os
 import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
+import os
 
-from groq import Groq
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from llm_provider import get_llm_provider
 from rag import buscar_contexto_normativo
 from prompts import SYSTEM_ANALYSIS, SYSTEM_PLAN
 
@@ -40,12 +52,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Groq client (singleton) ──────────────────────────────────
-_groq = Groq(api_key=os.environ["GROQ_API_KEY"])
-
 # ── Segurança: chave compartilhada Next.js ↔ Python ─────────
 _API_SECRET = os.environ.get("API_SECRET_KEY", "")
 _bearer = HTTPBearer()
+
 
 def verify_secret(creds: HTTPAuthorizationCredentials = Security(_bearer)):
     if not _API_SECRET or creds.credentials != _API_SECRET:
@@ -79,13 +89,13 @@ class ActionPlanRequest(BaseModel):
 
 class W5H2Action(BaseModel):
     id:       str
-    what:     str        # O quê
-    why:      str        # Por quê
-    who:      str        # Quem
-    where:    str        # Onde
-    when:     str        # Quando
-    how:      str        # Como
-    how_much: str        # Quanto custa
+    what:     str
+    why:      str
+    who:      str
+    where:    str
+    when:     str
+    how:      str
+    how_much: str
     status:   str = "pending"
 
 
@@ -123,36 +133,11 @@ class ActionPlanResponse(BaseModel):
 # HELPERS
 # ════════════════════════════════════════════════════════════
 
-MODEL = "llama-3.3-70b-versatile"
-
-
-def _call_groq(system: str, user_content: str, max_tokens: int = 4000) -> dict:
-    """Chama o Groq e retorna o JSON parseado."""
-    completion = _groq.chat.completions.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        temperature=0.3,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user_content},
-        ],
-    )
-    raw = completion.choices[0].message.content
-    # Remove possível markdown fence residual
-    clean = raw.strip()
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[-1]
-        clean = clean.rsplit("```", 1)[0]
-    return json.loads(clean.strip())
-
-
 def _safe_rag(query: str) -> str:
-    """Busca RAG com fallback silencioso."""
     try:
         return buscar_contexto_normativo(query)
     except Exception as e:
-        log.warning(f"RAG indisponível: {e}")
+        log.warning("RAG indisponível: %s", e)
         return ""
 
 
@@ -186,8 +171,7 @@ def _build_plan_prompt(req: ActionPlanRequest, rag_ctx: str) -> str:
     return prompt
 
 
-def _parse_analysis(raw: dict) -> AnalysisResponse:
-    """Normaliza a resposta do modelo para o schema de saída."""
+def _parse_analysis(raw: dict, model: str) -> AnalysisResponse:
     problems = [
         Problem(
             titulo=p.get("titulo", ""),
@@ -226,18 +210,16 @@ def _parse_analysis(raw: dict) -> AnalysisResponse:
         problems=problems,
         action_plan=action_plan,
         pdca=pdca,
-        rag_used=False,  # preenchido no handler
-        model=MODEL,
+        rag_used=False,
+        model=model,
     )
 
 
-def _parse_plan(raw: dict) -> tuple[list[W5H2Action], PDCAStep]:
-    """Normaliza resposta de plano (suporta formato antigo do Streamlit e novo)."""
+def _parse_plan(raw: dict, model: str) -> tuple[list[W5H2Action], PDCAStep]:
     if "action_plan" in raw:
         actions_raw = raw["action_plan"]
         pdca_raw    = raw.get("pdca", {})
     elif "acoes" in raw:
-        # Compatibilidade com formato antigo (campos em português do Streamlit/Groq)
         actions_raw = [
             {
                 "id":       f"acao_{i+1}",
@@ -287,7 +269,9 @@ def _parse_plan(raw: dict) -> tuple[list[W5H2Action], PDCAStep]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("Agente HSE-IT iniciado — modelo: %s", MODEL)
+    provider = get_llm_provider()
+    log.info("Agente HSE-IT iniciado — provider: %s | modelo: %s",
+             type(provider).__name__, provider.model_name)
     yield
     log.info("Agente HSE-IT encerrado")
 
@@ -295,13 +279,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Agente HSE-IT",
     description="API de análise psicossocial e geração de planos de ação 5W2H + PDCA",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # adicione o domínio de produção antes do deploy
+    allow_origins=["http://localhost:3000"],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
@@ -310,23 +294,19 @@ app.add_middleware(
 # ── Health ──────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL}
+    provider = get_llm_provider()
+    return {"status": "ok", "provider": type(provider).__name__, "model": provider.model_name}
 
 
-# ── Endpoint 1: Análise completa (análise + problemas + 5W2H + PDCA) ──
+# ── Endpoint 1: Análise completa ────────────────────────────
 @app.post("/insights/generate", response_model=AnalysisResponse)
 def generate_insight(
     req: AnalysisRequest,
     _: bool = Depends(verify_secret),
 ):
-    """
-    Recebe dados de um gráfico e retorna análise textual,
-    lista de problemas, plano 5W2H e PDCA.
-    Chamado pelo Next.js quando o usuário clica em 'Gerar Análise'.
-    """
     log.info("generate_insight: chart_key=%s campaign=%s", req.chart_key, req.campaign_name)
+    provider = get_llm_provider()
 
-    # 1. RAG — busca contexto normativo relevante
     rag_ctx  = ""
     rag_used = False
     if req.use_rag:
@@ -334,19 +314,17 @@ def generate_insight(
         rag_ctx  = _safe_rag(query)
         rag_used = bool(rag_ctx)
 
-    # 2. Monta prompt e chama modelo
     user_prompt = _build_analysis_prompt(req, rag_ctx)
     try:
-        raw = _call_groq(SYSTEM_ANALYSIS, user_prompt, max_tokens=4000)
+        raw = provider.complete_json(SYSTEM_ANALYSIS, user_prompt, max_tokens=4000)
     except json.JSONDecodeError as e:
         log.error("JSON parse error: %s", e)
         raise HTTPException(status_code=502, detail="Modelo retornou resposta inválida")
     except Exception as e:
-        log.error("Groq error: %s", e)
+        log.error("Provider error: %s", e)
         raise HTTPException(status_code=502, detail=f"Erro no modelo: {e}")
 
-    # 3. Normaliza e retorna
-    result = _parse_analysis(raw)
+    result = _parse_analysis(raw, provider.model_name)
     result.rag_used = rag_used
     return result
 
@@ -357,36 +335,29 @@ def generate_action_plan(
     req: ActionPlanRequest,
     _: bool = Depends(verify_secret),
 ):
-    """
-    Recebe a descrição de um problema identificado e retorna
-    um plano 5W2H + PDCA específico para aquele problema.
-    Chamado quando o usuário clica em 'Gerar Plano' em um problema listado.
-    """
     log.info("generate_action_plan: group=%s class=%s", req.problem_group, req.risk_class)
+    provider = get_llm_provider()
 
-    # 1. RAG
     rag_ctx  = ""
     rag_used = False
     if req.use_rag:
         rag_ctx  = _safe_rag(req.problem_desc)
         rag_used = bool(rag_ctx)
 
-    # 2. Modelo
     user_prompt = _build_plan_prompt(req, rag_ctx)
     try:
-        raw = _call_groq(SYSTEM_PLAN, user_prompt, max_tokens=3000)
+        raw = provider.complete_json(SYSTEM_PLAN, user_prompt, max_tokens=3000)
     except json.JSONDecodeError as e:
         log.error("JSON parse error: %s", e)
         raise HTTPException(status_code=502, detail="Modelo retornou resposta inválida")
     except Exception as e:
-        log.error("Groq error: %s", e)
+        log.error("Provider error: %s", e)
         raise HTTPException(status_code=502, detail=f"Erro no modelo: {e}")
 
-    # 3. Normaliza e retorna
-    actions, pdca = _parse_plan(raw)
+    actions, pdca = _parse_plan(raw, provider.model_name)
     return ActionPlanResponse(
         action_plan=actions,
         pdca=pdca,
         rag_used=rag_used,
-        model=MODEL,
+        model=provider.model_name,
     )
