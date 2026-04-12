@@ -1,0 +1,22 @@
+# Ambiente e segredos
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Modelos baixados pelo sentence-transformers
+~/.cache/huggingface/
+.cache/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
