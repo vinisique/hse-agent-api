@@ -2,21 +2,27 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Instala dependências do sistema para psycopg2
+# Dependências de sistema para psycopg2
 RUN apt-get update && apt-get install -y \
     libpq-dev gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copia e instala dependências Python
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copia requirements de produção (sem CUDA)
+COPY requirements.prod.txt .
 
-# Pré-baixa o modelo de embeddings (multilingual-e5-large ~560 MB)
-# Evita timeout no primeiro request em produção
+# Instala torch CPU-only primeiro (índice específico evita baixar versão CUDA)
+RUN pip install --no-cache-dir \
+    torch==2.11.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Instala restante das dependências
+RUN pip install --no-cache-dir -r requirements.prod.txt
+
+# Pré-baixa o modelo de embeddings (~560 MB) — evita timeout no primeiro request
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('intfloat/multilingual-e5-large')"
 
 # Copia o código
-COPY main.py prompts.py rag.py ./
+COPY main.py prompts.py rag.py llm_provider.py ./
 
 EXPOSE 8001
 
