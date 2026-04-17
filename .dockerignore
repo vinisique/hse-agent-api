@@ -1,0 +1,45 @@
+# Segredos — nunca entram na imagem
+.env
+.env.*
+
+# Ambientes virtuais
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Cache de modelos — são baixados no build via RUN python -c "..."
+.cache/
+~/.cache/
+
+# Testes e desenvolvimento
+teste.py
+teste*.py
+*.test.py
+tests/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+.dockerignore
+docker-compose*.yml
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Requirements de desenvolvimento (usa só o prod)
+requirements.txt
